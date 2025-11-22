@@ -1,0 +1,191 @@
+# Google Apps Script to dynamically populate events in a calendar
+
+
+// Populates or redraws the Yearly Calendar grid from the Events sheet
+// Use: populateCalendar(false) normally, or populateCalendar(true) to reset grid (clear + redraw)
+
+function populateCalendar(redrawOnly = false) {
+  // Getting sheets
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const cal = ss.getSheetByName("Yearly Calendar");
+  const eventsSheet = ss.getSheetByName("Events");
+  if (!cal || !eventsSheet) throw new Error("Missing sheet."); // Error message
+
+  // Campus colors (6 + 'ALL')
+  const campusColors = {
+    "MFC": "#ffc8aa",
+    "KBC": "#c6dbe1",
+    "SPC": "#d4edbc",
+    "EMC": "#ffcfc9",
+    "IDC": "#bfe1f6",
+    "DLC": "#ffe5a0",
+    "ALL": "#e8eaed"
+  };
+
+  // Get event data dynamically (as the length of the "Events" sheet can change)
+  const lastRow = eventsSheet.getLastRow(); // last row of the sheet
+  const events = lastRow > 1
+    ? eventsSheet.getRange(2, 1, lastRow - 1, 8).getValues() // Start from row 2 & column 1, the number of rows is last row - 1, and 8 columns in the lookup range
+    : []; // store as array
+
+  // Month grid definitions
+  const months = [
+    {name: "January", dateRows: ["B6:H6","B14:H14","B22:H22","B30:H30","B38:H38"]},
+    {name: "February", dateRows: ["J6:P6","J14:P6","J22:P22","J30:P30","J38:P38"]},
+    {name: "March", dateRows: ["R6:X6","R14:X14","R22:X22","R30:X30","R38:X38"]},
+    {name: "April", dateRows: ["B50:H50","B58:H58","B66:H66","B74:H74","B82:H82"]},
+    {name: "May", dateRows: ["J50:P50","J58:P58","J66:P66","J74:P74","J82:P82"]},
+    {name: "June", dateRows: ["R50:X50","R58:X58","R66:X66","R74:X74","R82:X82"]},
+    {name: "July", dateRows: ["B94:H94","B102:H102","B110:H110","B118:H118","B126:H126"]},
+    {name: "August", dateRows: ["J94:P94","J102:P102","J110:P110","J118:P118","J126:P126"]},
+    {name: "September", dateRows: ["R94:X94","R102:X102","R110:X110","R118:X118","R126:X126"]},
+    {name: "October", dateRows: ["B138:H138","B146:H146","B154:H154","B162:H162","B170:H170"]},
+    {name: "November", dateRows: ["J138:P138","J146:P146","J154:P154","J162:P162","J170:P170"]},
+    {name: "December", dateRows: ["R138:X138","R146:X146","R154:X154","R162:X162","R170:X170"]}
+  ];
+
+  const slicesPerWeek = 7; // rows per week for events (one row per campus)
+  // Log message if manually running
+  Logger.log(`Starting ${redrawOnly ? "Full grid reset" : "Populating calendat"}...`); 
+
+  // Helper functions
+  // Ensures that all dates are returned as 'new Date(Y, M, D)'
+  function normalizeDate(cell) {
+    // if the value is a date, convert to format wanted
+    if (cell instanceof Date)
+      return new Date(cell.getFullYear(), cell.getMonth(), cell.getDate()); // getting the year, month, and date
+    // if the value is a number, GS will store it as a serial date value (i.e. 25569 for Jan 1, 1970)
+    // Converting to a Javascript date
+    if (typeof cell === "number")
+      // 25569: offset between the goolge sheet and unix epoch (subtract 25569 from the sheets date to get the Javascript date (in milliseconds))
+      // 86400 * 1000: multiple by seconds per day and ms per second
+      return new Date(Math.round((cell - 25569) * 86400 * 1000));
+    // if 'date' value is a string, convert to a date object
+    const parsed = new Date(cell);
+    // returns normalised date
+    return !isNaN(parsed) ? new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()) : null;
+  }
+
+  // Unmerging previously merged cells
+  function safeUnmerge(sheet, targetRange) {
+    const allMerged = sheet.getDataRange().getMergedRanges(); // Get all merged ranges
+    // Defining boundaries of areas to unmerge
+    const trRow = targetRange.getRow();
+    const trCol = targetRange.getColumn();
+    const trRows = targetRange.getNumRows();
+    const trCols = targetRange.getNumColumns();
+
+  // Lopp over merged cells to see if it is within targetRange
+    allMerged.forEach(mr => {
+      // getting poition and size of the merged cells
+      const mrRow = mr.getRow();
+      const mrCol = mr.getColumn();
+      const mrRows = mr.getNumRows();
+      const mrCols = mr.getNumColumns();
+      // checking if cells are within targetRange (based on top-left and bottom-right corners)
+      const fitsInside =
+        mrRow >= trRow && mrCol >= trCol &&
+        (mrRow + mrRows - 1) <= (trRow + trRows - 1) &&
+        (mrCol + mrCols - 1) <= (trCol + trCols - 1);
+      // if inside, breka apart merged cells
+      if (fitsInside) mr.breakApart();
+    });
+  }
+
+  // Clears area under the date rows (i.e removes events)
+  function clearWeekArea(sheet, row, col, width, slices) {
+    const weekRange = sheet.getRange(row + 1, col, slices, width); // getting range of the event cells
+    safeUnmerge(sheet, weekRange); // unmerges any cells
+    weekRange.clearContent(); // removing cell contents
+    weekRange.setBackground(null); // resetting cell formatting
+    weekRange.setBorder(false, false, false, false, false, false, null, null);
+
+    // Redraw grid lines neatly
+    for (let i = 0; i < slices; i++) {
+      const sliceRow = sheet.getRange(row + 1 + i, col, 1, width); // range of the rows
+      sliceRow.setBorder(
+        i === 0,                     // top on first slice
+        true,                        // left
+        i === slices - 1,            // bottom on last
+        true,                        // right
+        true,                        // inner vertical
+        false,                       // inner horizontal
+        "#cccccc",                   // line color
+        SpreadsheetApp.BorderStyle.SOLID // solid line style
+      );
+    }
+  }
+
+  // Main function
+  // loop
+  months.forEach(month => {
+    month.dateRows.forEach(dateRange => {
+      // Getting dates
+      const dateRowRange = cal.getRange(dateRange);
+      const dateRow = dateRowRange.getValues()[0]; // array of date cells
+      const firstCol = dateRowRange.getColumn();
+      const dateRowNumber = dateRowRange.getRow();
+
+      // Always clear and redraw grid area
+      clearWeekArea(cal, dateRowNumber, firstCol, dateRow.length, slicesPerWeek);
+      if (redrawOnly) return; // stop here if just resetting (i.e. if redrawOnly === true)
+
+      // Populating
+      const occupied = Array(slicesPerWeek).fill(false); // tracks which campus is populating which slice
+      const campusSliceMap = {};
+
+      // Getting the items required (i.e. Campus, Start Date, End Date, and Event Name) according to index
+      events.forEach(ev => {
+        const campus = ev[0];
+        const startDateRaw = ev[3];
+        const endDateRaw = ev[4] || ev[3]; // if no end date, then single date event
+        const eventName = ev[7];
+        if (!campus || !startDateRaw || !eventName) return; // if anthing is missing, skip the event
+
+        // Converting start and end dates
+        const start = normalizeDate(startDateRaw);
+        const end = normalizeDate(endDateRaw);
+        if (!start || !end) return; // if dates cannot be converted, skip event
+
+        // Assign a slice per campus
+        if (campusSliceMap[campus] === undefined) {
+          const available = occupied.findIndex(v => !v); // find unused slice row
+          if (available === -1) return; // if all slices taken, skip event
+          campusSliceMap[campus] = available; // assign the campus to the available slice
+          occupied[available] = true; // mark slice as used
+        }
+
+        const slice = campusSliceMap[campus]; // Look up the campus' slice
+        const row = dateRowNumber + 1 + slice; // getting the row wher event bar will be drawn (start from date row, moves down 1 and then moves down to campus' assigned slice)
+
+        let startColIdx = null, endColIdx = null;
+        // Finding event's start and end date within a date row 
+        dateRow.forEach((cell, colIdx) => { // dateRow: array of dates such as [ Jan 1, Jan 2, Jan 3, Jan 4, Jan 5, Jan 6, Jan 7 ]
+          const cellDate = normalizeDate(cell); // convert cell into date object
+          if (!cellDate) return;
+          if (cellDate >= start && startColIdx === null) startColIdx = colIdx; // set start column when cellDate first reaches or passes event start date
+          if (cellDate <= end) endColIdx = colIdx; // setting end column while dates are less than or equal to event end date.
+        });
+
+        // Draw event bar
+        if (startColIdx !== null && endColIdx !== null && endColIdx >= startColIdx) {
+          const mergeRange = cal.getRange(row, firstCol + startColIdx, 1, endColIdx - startColIdx + 1);
+          mergeRange.merge(); // Merges if multi-day event
+          mergeRange.setValue(`${campus} - ${eventName}`); // setting label of the event on the calendar
+          mergeRange.setBackground(campusColors[campus] || "#cccccc"); // background
+          mergeRange.setWrap(true);
+          mergeRange.setBorder(false, true, slice === slicesPerWeek - 1, true, null, null, "#cccccc", SpreadsheetApp.BorderStyle.SOLID); // formatting (as above)
+        }
+      });
+    });
+  });
+
+  // Log message
+  Logger.log(`Calendar ${redrawOnly ? "Fully reset and redrawn" : "Populated successfully"}.`);
+}
+
+// Optional trigger for Event sheet edits
+function onEdit(e) {
+  const sheet = e.range.getSheet();
+  if (sheet.getName() === "Events") populateCalendar();
+}
